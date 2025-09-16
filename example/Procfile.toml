@@ -1,0 +1,21 @@
+exit-on-stop = true
+exit-on-error = false
+[[procs]]
+	name = "mysql"
+	work-dir = "/opt/local/mysql"
+	cmd-line = "mysqld"
+	restart = "always"
+
+[[procs]]
+	name = "web"
+	work-dir = "/home/user"
+	cmd-line = "python3 run app.py"
+	restart = "on-failure"
+	depend = ["mysqld"]
+
+[[procs]]
+	name = "service"
+	work-dir = "/home/user/service"
+	cmd-line = "go run service.go"
+	restart = "never"
+	depend = ["mysql", "web"]
