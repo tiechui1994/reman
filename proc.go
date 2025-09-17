@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -47,6 +49,35 @@ type emptyWriter struct{}
 
 func (n emptyWriter) Write(p []byte) (int, error) {
 	return len(p), nil
+}
+
+func versionProc(name string) error {
+	proc := findProc(name)
+	if proc.WorkDir != "" {
+		_ = os.Chdir(proc.WorkDir)
+	}
+	args, err := ParseCmdline(proc.CmdLine)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cs := append(cmdStart, args[0], "-v")
+	cmd := exec.CommandContext(ctx, cs[0], cs[1:]...)
+	cmd.Dir = proc.WorkDir
+
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+
+	err = cmd.Run()
+	if err != nil {
+		return err
+	}
+
+	proc.version = buf.String()
+	return nil
 }
 
 // spawnProc starts the specified proc, and returns any error from running it.
@@ -178,9 +209,19 @@ func startProc(name string, errCh chan<- error) error {
 
 	procConfig.group.Add(1)
 	go func() {
+		defer func() {
+			procConfig.group.Done()
+			proc.mu.Unlock()
+		}()
+
+		if proc.Version {
+			err := versionProc(name)
+			if err != nil {
+				return
+			}
+		}
+
 		spawnProc(name, errCh)
-		procConfig.group.Done()
-		proc.mu.Unlock()
 	}()
 	return nil
 }

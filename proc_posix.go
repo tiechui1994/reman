@@ -48,6 +48,10 @@ func reuseListenConfig() *net.ListenConfig {
 	}
 }
 
+func ParseCmdline(cmdline string) ([]string, error) {
+	return Split(cmdline)
+}
+
 func (p *ProcInfo) startHook() error {
 	return nil
 }

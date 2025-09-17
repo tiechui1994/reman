@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
@@ -62,6 +63,37 @@ func reuseListenConfig() *net.ListenConfig {
 			return opErr
 		},
 	}
+}
+
+func ParseCmdline(cmdline string) ([]string, error) {
+	ptr, err := syscall.UTF16PtrFromString(cmdline)
+	if err != nil {
+		return nil, err
+	}
+
+	var argc int32
+	argv, err := windows.CommandLineToArgv(ptr, &argc)
+	if err != nil {
+		return nil, err
+	}
+	defer windows.LocalFree(windows.Handle(unsafe.Pointer(argv)))
+
+	if argc == 0 {
+		return []string{}, nil
+	}
+
+	args := make([]string, argc)
+	start := unsafe.Pointer(argv)
+	// 计算每个指针的大小 (在 64 位系统上是 8 字节)
+	size := unsafe.Sizeof(uintptr(0))
+
+	for i := 0; i < int(argc); i++ {
+		// 计算第 i 个参数的指针地址
+		p := *(**uint16)(unsafe.Pointer(uintptr(start) + uintptr(i)*size))
+		args[i] = windows.UTF16PtrToString(p)
+	}
+
+	return args, nil
 }
 
 func (p *ProcInfo) terminateProcLock(signal os.Signal) error {

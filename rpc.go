@@ -225,7 +225,7 @@ func printTable(keys []string, values [][]string) string {
 
 // List do list
 func (r *Reman) List(args []string, ret *string) (err error) {
-	var keys = [5]string{"Name", "Status", "Time", "Restart", "LastError"}
+	var keys = [6]string{"Name", "Status", "Time", "Restart", "LastError", "Version"}
 	var values = make([][]string, 0, len(procConfig.Procs))
 
 	var jsonOut bool
@@ -243,7 +243,8 @@ func (r *Reman) List(args []string, ret *string) (err error) {
 				list := make([]map[string]string, 0)
 				for _, v := range values {
 					list = append(list, map[string]string{
-						"Name": v[0], "Status": v[1], "Time": v[2], "Restart": v[3], "LastError": v[4],
+						"Name": v[0], "Status": v[1], "Time": v[2], "Restart": v[3],
+						"LastError": v[4], "Version": v[4],
 					})
 				}
 				result["data"] = list
@@ -288,6 +289,7 @@ func (r *Reman) List(args []string, ret *string) (err error) {
 			three(proc.waitErr != nil, func() string {
 				return proc.waitErr.Error()
 			}, nil),
+			proc.version,
 		})
 	}
 	*ret = printTable(keys[:], values)

@@ -67,6 +67,7 @@ type ProcInfo struct {
 	Depend            []string          `toml:"depend,omitempty"`
 	Restart           Restart           `toml:"restart,omitempty"` // "always", "on-failure", "never"
 	RestartMaxRetries int               `toml:"restart-max-retries,omitempty"`
+	Version           bool              `toml:"version,omitempty"`
 
 	// True if we called stopProc to kill the process, in which case an
 	// *os.ExitError is not the fault of the subprocess
@@ -83,6 +84,7 @@ type ProcInfo struct {
 	colorIndex  int
 	service     bool
 	serviceAttr ServiceAttr
+	version     string
 }
 
 func (p *ProcInfo) ReadyStart() {
