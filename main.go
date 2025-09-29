@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -40,6 +41,7 @@ func usage() {
                                        restart-all
                                        list
                                        status
+                                       upgrade
   reman start [PROCESS]            # Start the application
   reman version                    # Display Reman version
 Options:
@@ -63,7 +65,7 @@ type ProcInfo struct {
 	CmdLine           string            `toml:"cmd-line"`
 	Env               map[string]string `toml:"env,omitempty"`
 	IsShow            bool              `toml:"is-show,omitempty"`
-	NoLog             bool              `toml:"no-log,omitempty"`
+	Log               string            `toml:"log,omitempty"`
 	Depend            []string          `toml:"depend,omitempty"`
 	Restart           Restart           `toml:"restart,omitempty"` // "always", "on-failure", "never"
 	RestartMaxRetries int               `toml:"restart-max-retries,omitempty"`
@@ -85,6 +87,7 @@ type ProcInfo struct {
 	service     bool
 	serviceAttr ServiceAttr
 	version     string
+	noLog       bool
 }
 
 func (p *ProcInfo) ReadyStart() {
@@ -214,6 +217,13 @@ func readProcfile(cfg *config) error {
 			return fmt.Errorf("name or cmdline can not empty")
 		}
 
+		if proc.Log != "" {
+			if !filepath.IsAbs(proc.Log) {
+				proc.Log, _ = filepath.Abs(filepath.Join(proc.WorkDir, proc.Log))
+			}
+		}
+		proc.Log = filepath.ToSlash(proc.Log)
+
 		if proc.Restart == "" {
 			proc.Restart = RestartOnFailure
 			proc.RestartMaxRetries = 100
@@ -227,10 +237,7 @@ func readProcfile(cfg *config) error {
 		}
 		proc.service = *serviceName != ""
 		if proc.service {
-			proc.NoLog = true
-			proc.IsShow = false
-		}
-		if proc.NoLog {
+			proc.noLog = true
 			proc.IsShow = false
 		}
 		proc.colorIndex = index

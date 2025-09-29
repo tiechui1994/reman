@@ -5,12 +5,37 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"net/rpc"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 )
+
+func rename(oldPath, newPath string) error {
+	err := os.Rename(oldPath, newPath)
+	if err == nil {
+		return err
+	}
+
+	w, err := os.OpenFile(newPath, os.O_SYNC|os.O_CREATE|os.O_RDWR, os.ModePerm)
+	if err != nil {
+		return err
+	}
+	defer w.Close()
+	r, err := os.OpenFile(oldPath, os.O_RDONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	_, err = io.CopyBuffer(w, r, make([]byte, 8192))
+	return err
+}
 
 // Reman is RPC server
 type Reman struct {
@@ -189,6 +214,114 @@ func (r *Reman) RestartAll(args []string, ret *string) (err error) {
 	return err
 }
 
+// Upgrade
+func (r *Reman) Upgrade(args []string, ret *string) (err error) {
+	var jsonOut bool
+	if len(args) > 0 && args[0] == "-json" {
+		jsonOut = true
+		args = args[1:]
+	}
+	defer func() {
+		if jsonOut {
+			var result = make(map[string]interface{})
+			result["success"] = err == nil
+			if err != nil {
+				result["error"] = err
+			}
+			raw, _ := json.Marshal(result)
+			*ret = string(raw)
+		}
+	}()
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = r.(error)
+		}
+	}()
+
+	if len(args) < 2 {
+		return fmt.Errorf("args must NAME PATH")
+	}
+
+	name := args[0]
+	path := args[1]
+
+	proc := findProc(name)
+	if proc == nil {
+		err = errors.New("unknown proc: " + name)
+		return err
+	}
+	if strings.HasPrefix(path, "http") {
+		resp, err := http.Get(path)
+		if err != nil {
+			return fmt.Errorf("downalod file: %v", err)
+		}
+
+		dir := proc.WorkDir
+		if dir == "" {
+			dir, _ = os.Getwd()
+		}
+
+		switch runtime.GOOS {
+		case "windows":
+			path = name + "_upgrade.exe"
+		default:
+			path = name + "_upgrade"
+		}
+		path = filepath.Join(dir, path)
+		writer, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
+		if err != nil {
+			return fmt.Errorf("create upgrade file: %v", err)
+		}
+
+		_, err = io.CopyBuffer(writer, resp.Body, make([]byte, 8192))
+		if err != nil {
+			return fmt.Errorf("copy file: %v", err)
+		}
+	}
+	if _, err = os.Stat(path); err != nil {
+		return err
+	}
+
+	// 1. stop
+	err = stopProc(name, nil)
+	if err != nil {
+		return err
+	}
+
+	// 2. rename
+	if proc.WorkDir != "" {
+		_ = os.Chdir(proc.WorkDir)
+	}
+	cmdArgs, err := ParseCmdline(proc.CmdLine)
+	if err != nil {
+		return err
+	}
+	cmdName := cmdArgs[0]
+
+	var backupName string
+	if index := strings.LastIndex(cmdName, "."); index >= 0 {
+		name := cmdName[:index]
+		backupName = strings.Replace(cmdName, name, fmt.Sprintf("%s_%s", name, time.Now().Format("0102150405")), 1)
+	} else {
+		name := cmdName
+		backupName = strings.Replace(cmdName, name, fmt.Sprintf("%s_%s", name, time.Now().Format("0102150405")), 1)
+	}
+	err = rename(cmdName, backupName)
+	if err != nil {
+		return err
+	}
+	err = rename(path, cmdName)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(path)
+
+	// 3. start
+	err = startProc(name, nil)
+	return err
+}
+
 func printTable(keys []string, values [][]string) string {
 	maxLine := make([]int, len(keys))
 	for idx, key := range keys {
@@ -225,7 +358,7 @@ func printTable(keys []string, values [][]string) string {
 
 // List do list
 func (r *Reman) List(args []string, ret *string) (err error) {
-	var keys = [6]string{"Name", "Status", "Time", "Restart", "LastError", "Version"}
+	var keys = [7]string{"Name", "Status", "Time", "Restart", "LastError", "Version", "Log"}
 	var values = make([][]string, 0, len(procConfig.Procs))
 
 	var jsonOut bool
@@ -244,7 +377,7 @@ func (r *Reman) List(args []string, ret *string) (err error) {
 				for _, v := range values {
 					list = append(list, map[string]string{
 						"Name": v[0], "Status": v[1], "Time": v[2], "Restart": v[3],
-						"LastError": v[4], "Version": v[4],
+						"LastError": v[4], "Version": v[5], "Log": v[6],
 					})
 				}
 				result["data"] = list
@@ -290,6 +423,7 @@ func (r *Reman) List(args []string, ret *string) (err error) {
 				return proc.waitErr.Error()
 			}, nil),
 			proc.version,
+			proc.Log,
 		})
 	}
 	*ret = printTable(keys[:], values)
@@ -377,6 +511,8 @@ func run(cmd string, args []string, serverPort uint) error {
 		err := client.Call("Reman.Status", args, &ret)
 		fmt.Print(ret)
 		return err
+	case "upgrade":
+		return client.Call("Reman.Upgrade", args, &ret)
 	}
 	return errors.New("unknown command")
 }

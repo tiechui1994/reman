@@ -94,7 +94,7 @@ again:
 	cmd.SysProcAttr = sysProcAttr()
 	cmd.Dir = proc.WorkDir
 	cmd.Stdin = nil
-	if proc.NoLog {
+	if proc.noLog {
 		cmd.Stdout = emptyWriter{}
 		cmd.Stderr = emptyWriter{}
 	} else {
