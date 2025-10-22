@@ -85,7 +85,6 @@ func spawnProc(name string, errCh chan<- error) {
 again:
 	proc := findProc(name)
 	proc.ReadyStart()
-	logger := createLogger(name, proc.colorIndex)
 	if proc.WorkDir != "" {
 		_ = os.Chdir(proc.WorkDir)
 	}
@@ -98,6 +97,7 @@ again:
 		cmd.Stdout = emptyWriter{}
 		cmd.Stderr = emptyWriter{}
 	} else {
+		logger := createLogger(name, proc.colorIndex)
 		cmd.Stdout = logger
 		cmd.Stderr = logger
 	}
@@ -168,7 +168,7 @@ again:
 
 	proc.waitErr = err
 	proc.cmd = nil
-	fmt.Fprintf(logger, "terminating %s\n", name)
+	fmt.Fprintf(os.Stdout, "terminating %s\n", name)
 }
 
 // Stop the specified proc, issuing os.Kill if it does not terminate within 10

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	_ "net/http/pprof"
 )
 
 func rename(oldPath, newPath string) error {
@@ -484,6 +487,39 @@ func (r *Reman) Status(args []string, ret *string) (err error) {
 	return err
 }
 
+func (r *Reman) Debug(args []string, ret *string) (err error) {
+	var ch = make(chan error, 1)
+	addr := fmt.Sprintf("0.0.0.0:%d", rand.Int31n(65535-1024)+1024)
+	go func() {
+		server := http.Server{
+			Addr:    addr,
+			Handler: http.DefaultServeMux,
+		}
+
+		done := make(chan struct{})
+		go func() {
+			ch <- server.ListenAndServe()
+			close(done)
+		}()
+
+		select {
+		case <-time.After(time.Hour):
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+			defer cancel()
+			_ = server.Shutdown(ctx)
+		case <-done:
+		}
+	}()
+
+	select {
+	case err = <-ch:
+		return err
+	case <-time.After(5 * time.Second):
+		*ret = fmt.Sprintf("debug pprof: http://%s", addr)
+		return nil
+	}
+}
+
 // command: run.
 func run(cmd string, args []string, serverPort uint) error {
 	client, err := rpc.Dial("tcp", defaultServer(serverPort))
@@ -504,15 +540,21 @@ func run(cmd string, args []string, serverPort uint) error {
 	case "restart-all":
 		return client.Call("Reman.RestartAll", args, &ret)
 	case "list":
-		err := client.Call("Reman.List", args, &ret)
+		err = client.Call("Reman.List", args, &ret)
 		fmt.Print(ret)
 		return err
 	case "status":
-		err := client.Call("Reman.Status", args, &ret)
+		err = client.Call("Reman.Status", args, &ret)
 		fmt.Print(ret)
 		return err
 	case "upgrade":
 		return client.Call("Reman.Upgrade", args, &ret)
+	case "debug":
+		err = client.Call("Reman.Debug", args, &ret)
+		if err == nil {
+			fmt.Println(ret)
+		}
+		return err
 	}
 	return errors.New("unknown command")
 }

@@ -14,9 +14,7 @@ type clogger struct {
 	idx     int
 	name    string
 	writes  chan []byte
-	done    chan struct{}
-	timeout time.Duration // how long to wait before printing partial lines
-	buffers buffers       // partial lines awaiting printing
+	buffers buffers // partial lines awaiting printing
 }
 
 var colors = []int{
@@ -75,54 +73,27 @@ func (l *clogger) writeBuffers(line []byte) {
 	mutex.Unlock()
 }
 
-// bundle writes into lines, waiting briefly for completion of lines
-func (l *clogger) writeLines() {
-	var tick <-chan time.Time
-	for {
-		select {
-		case w, ok := <-l.writes:
-			if !ok {
-				if len(l.buffers) > 0 {
-					l.writeBuffers([]byte("\n"))
-				}
-				return
-			}
-			buf := bytes.NewBuffer(w)
-			for {
-				line, err := buf.ReadBytes('\n')
-				if len(line) > 0 {
-					if line[len(line)-1] == '\n' {
-						// any text followed by a newline should flush
-						// existing buffers. a bare newline should flush
-						// existing buffers, but only if there are any.
-						if len(line) != 1 || len(l.buffers) > 0 {
-							l.writeBuffers(line)
-						}
-						tick = nil
-					} else {
-						l.buffers = append(l.buffers, line)
-						tick = time.After(l.timeout)
-					}
-				}
-				if err != nil {
-					break
-				}
-			}
-			l.done <- struct{}{}
-		case <-tick:
-			if len(l.buffers) > 0 {
-				l.writeBuffers([]byte("\n"))
-			}
-			tick = nil
-		}
-	}
-
-}
-
 // write handler of logger.
 func (l *clogger) Write(p []byte) (int, error) {
-	l.writes <- p
-	<-l.done
+	buf := bytes.NewBuffer(p)
+	for {
+		line, err := buf.ReadBytes('\n')
+		if len(line) > 0 {
+			if line[len(line)-1] == '\n' {
+				// any text followed by a newline should flush
+				// existing buffers. a bare newline should flush
+				// existing buffers, but only if there are any.
+				if len(line) != 1 || len(l.buffers) > 0 {
+					l.writeBuffers(line)
+				}
+			} else {
+				l.buffers = append(l.buffers, line)
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
 	return len(p), nil
 }
 
@@ -130,7 +101,6 @@ func (l *clogger) Write(p []byte) (int, error) {
 func createLogger(name string, colorIndex int) *clogger {
 	mutex.Lock()
 	defer mutex.Unlock()
-	l := &clogger{idx: colorIndex, name: name, writes: make(chan []byte), done: make(chan struct{}), timeout: 2 * time.Millisecond}
-	go l.writeLines()
+	l := &clogger{idx: colorIndex, name: name, writes: make(chan []byte)}
 	return l
 }

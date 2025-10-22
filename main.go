@@ -42,6 +42,7 @@ func usage() {
                                        list
                                        status
                                        upgrade
+                                       debug
   reman start [PROCESS]            # Start the application
   reman version                    # Display Reman version
 Options:
