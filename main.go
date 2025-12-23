@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,8 +18,22 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/fsnotify/fsnotify"
 	"github.com/joho/godotenv"
 )
+
+var sysLogger *log.Logger
+
+func init() {
+	cmd, _ := os.Executable()
+	runPath := filepath.Join(filepath.Dir(cmd), "run.log")
+	fd, err := os.OpenFile(runPath, os.O_CREATE|os.O_APPEND|os.O_RDWR|os.O_SYNC, os.ModePerm)
+	if err != nil {
+		os.Exit(1)
+	}
+
+	sysLogger = log.New(fd, "[man] ", log.Lshortfile|log.Ltime|log.Ldate)
+}
 
 // version is the git tag at the time of build and is used to denote the
 // binary's current version. This value is supplied as an ldflag at compile
@@ -123,6 +138,98 @@ type ProcManager struct {
 	ExitOnStop  *bool       `toml:"exit-on-stop,omitempty"`
 	Procs       []*ProcInfo `toml:"procs"`
 	group       *ReuseWaitGroup
+}
+
+func (p *ProcManager) listen() {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return
+	}
+
+	var list sync.Map
+
+	type watchCmd struct {
+		proc *ProcInfo
+		name string
+		path string
+	}
+
+	go func() {
+		defer watcher.Close()
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				sysLogger.Println("event:", event)
+
+				var dir, name string
+				switch event.Op {
+				case fsnotify.Create:
+					// 在 CREATE 下, name 总是最终的文件名
+					dir, name = filepath.Split(event.Name)
+					if val, ok := list.Load(dir); ok {
+						watch := val.(*watchCmd)
+						if name == watch.name {
+							time.AfterFunc(time.Second*2, func() {
+								if watch.proc.cmd != nil {
+									sysLogger.Printf("restart %v ....", watch.proc.Name)
+									restartProc(watch.proc.Name)
+								}
+							})
+						}
+					}
+				case fsnotify.Rename:
+					// windows下: 当 RENAME 没有来源, Name 不可信
+					if strings.Contains(event.String(), "←") {
+						dir, name = filepath.Split(event.Name)
+					}
+					if val, ok := list.Load(dir); ok {
+						watch := val.(*watchCmd)
+						if name == watch.name {
+							time.AfterFunc(time.Second*1, func() {
+								if watch.proc.cmd != nil {
+									sysLogger.Printf("restart %v ....", watch.proc.Name)
+									restartProc(watch.proc.Name)
+								}
+							})
+						}
+					}
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				sysLogger.Println("error:", err)
+			}
+		}
+	}()
+
+	for _, cmd := range p.Procs {
+		args, err := ParseCmdline(cmd.CmdLine)
+		if err != nil {
+			sysLogger.Printf("parse %s: %v", cmd.CmdLine, err)
+			continue
+		}
+		cmdPath := args[0]
+		if cmd.WorkDir != "" {
+			cmdPath = filepath.Join(cmd.WorkDir, cmdPath)
+		}
+
+		dir, name := filepath.Split(cmdPath)
+		err = watcher.Add(dir)
+		if err != nil {
+			sysLogger.Printf("add watch %s: %v", cmdPath, err)
+			continue
+		}
+
+		list.Store(dir, &watchCmd{
+			proc: cmd,
+			path: dir,
+			name: name,
+		})
+	}
 }
 
 var (
@@ -251,6 +358,7 @@ func readProcfile(cfg *config) error {
 	}
 
 	procConfig = temp
+	procConfig.listen()
 	return nil
 }
 

@@ -5,27 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 )
-
-var sysLogger *log.Logger
-
-func init() {
-	cmd, _ := os.Executable()
-	runPath := filepath.Join(filepath.Dir(cmd), "run.log")
-	fd, err := os.OpenFile(runPath, os.O_CREATE|os.O_APPEND|os.O_RDWR|os.O_SYNC, os.ModePerm)
-	if err != nil {
-		os.Exit(1)
-	}
-
-	sysLogger = log.New(fd, "[man] ", log.Lshortfile|log.Ltime|log.Ldate)
-}
 
 type Option interface {
 	apply(p *syscall.SysProcAttr)
