@@ -172,7 +172,7 @@ func (p *ProcManager) listen() {
 					if val, ok := list.Load(dir); ok {
 						watch := val.(*watchCmd)
 						if name == watch.name {
-							time.AfterFunc(time.Second*2, func() {
+							time.AfterFunc(time.Millisecond*800, func() {
 								if watch.proc.cmd != nil {
 									sysLogger.Printf("restart %v ....", watch.proc.Name)
 									restartProc(watch.proc.Name)
@@ -188,7 +188,7 @@ func (p *ProcManager) listen() {
 					if val, ok := list.Load(dir); ok {
 						watch := val.(*watchCmd)
 						if name == watch.name {
-							time.AfterFunc(time.Second*1, func() {
+							time.AfterFunc(time.Millisecond*500, func() {
 								if watch.proc.cmd != nil {
 									sysLogger.Printf("restart %v ....", watch.proc.Name)
 									restartProc(watch.proc.Name)
