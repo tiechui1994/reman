@@ -4,9 +4,13 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -149,4 +153,193 @@ func notifyCh() <-chan os.Signal {
 
 func RunAsServiceIfNeeded(serviceName string) (bool, error) {
 	return false, nil
+}
+
+// InstallService installs reman as a systemd service on Unix systems
+func InstallService(cfg *config) error {
+	// Check if running as root
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("install command must be run as root (use sudo)")
+	}
+
+	// Check if procfile exists
+	procfilePath := cfg.Procfile
+	if procfilePath == "" {
+		procfilePath = *procfile
+	}
+	if procfilePath == "" {
+		procfilePath = "Procfile.toml"
+	}
+	
+	// Get absolute path of procfile
+	procfileAbsPath, err := filepath.Abs(procfilePath)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path of procfile: %w", err)
+	}
+	
+	// Check if procfile exists
+	if _, err := os.Stat(procfileAbsPath); os.IsNotExist(err) {
+		return fmt.Errorf("procfile does not exist: %s (please create the configuration file before installing the service)", procfileAbsPath)
+	}
+	
+	// Update cfg.Procfile to use absolute path for validation
+	cfg.Procfile = procfileAbsPath
+	
+	// Try to read and validate the procfile
+	if err := readProcfile(cfg); err != nil {
+		return fmt.Errorf("failed to validate procfile %s: %w", procfileAbsPath, err)
+	}
+
+	// Get the executable path
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+	exePath, err = filepath.Abs(exePath)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path: %w", err)
+	}
+
+	// Default service name
+	svcName := "reman"
+	if *serviceName != "" {
+		svcName = *serviceName
+	}
+
+	// Build service arguments
+	args := []string{"start"}
+	if cfg.Procfile != "" {
+		args = append(args, "-f", cfg.Procfile)
+	}
+	if cfg.Port != 0 {
+		args = append(args, "-p", fmt.Sprintf("%d", cfg.Port))
+	}
+	if cfg.BaseDir != "" {
+		args = append(args, "-basedir", cfg.BaseDir)
+	}
+
+	// Get current working directory
+	workDir, err := os.Getwd()
+	if err != nil {
+		workDir = "/"
+	}
+
+	// Get user and group
+	// If running with sudo, use SUDO_USER, otherwise use current user
+	user := os.Getenv("SUDO_USER")
+	if user == "" {
+		// Get current user
+		user = os.Getenv("USER")
+		if user == "" {
+			user = "root"
+		}
+	}
+	// Use same group as user (typically same name)
+	group := user
+
+	// Create systemd service file content
+	serviceContent := fmt.Sprintf(`[Unit]
+Description=Reman Process Manager
+After=network.target
+
+[Service]
+Type=simple
+User=%s
+Group=%s
+WorkingDirectory=%s
+ExecStart=%s %s
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+`, user, group, workDir, exePath, strings.Join(args, " "))
+
+	// Write service file
+	serviceFilePath := fmt.Sprintf("/etc/systemd/system/%s.service", svcName)
+
+	// Check if service already exists
+	if _, err := os.Stat(serviceFilePath); err == nil {
+		return fmt.Errorf("service %s already exists at %s", svcName, serviceFilePath)
+	}
+
+	// Write service file
+	err = os.WriteFile(serviceFilePath, []byte(serviceContent), 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write service file: %w", err)
+	}
+
+	// Reload systemd daemon
+	cmd := exec.Command("systemctl", "daemon-reload")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to reload systemd daemon: %w", err)
+	}
+
+	// Enable service to start on boot
+	cmd = exec.Command("systemctl", "enable", svcName)
+	if err := cmd.Run(); err != nil {
+		sysLogger.Printf("warning: failed to enable service: %v", err)
+	}
+
+	fmt.Fprintf(os.Stdout, "Service %s installed successfully.\n", svcName)
+	fmt.Fprintf(os.Stdout, "Service file: %s\n", serviceFilePath)
+	fmt.Fprintf(os.Stdout, "You can start it with: systemctl start %s\n", svcName)
+	fmt.Fprintf(os.Stdout, "You can stop it with: systemctl stop %s\n", svcName)
+	fmt.Fprintf(os.Stdout, "You can check status with: systemctl status %s\n", svcName)
+	fmt.Fprintf(os.Stdout, "You can remove it with: systemctl disable %s && rm %s\n", svcName, serviceFilePath)
+
+	return nil
+}
+
+// UninstallService uninstalls reman systemd service on Unix systems
+func UninstallService(cfg *config) error {
+	// Check if running as root
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("uninstall command must be run as root (use sudo)")
+	}
+
+	// Default service name
+	svcName := "reman"
+	if *serviceName != "" {
+		svcName = *serviceName
+	}
+
+	serviceFilePath := fmt.Sprintf("/etc/systemd/system/%s.service", svcName)
+
+	// Check if service file exists
+	if _, err := os.Stat(serviceFilePath); os.IsNotExist(err) {
+		return fmt.Errorf("service %s does not exist", svcName)
+	}
+
+	// Stop the service if it's running
+	cmd := exec.Command("systemctl", "stop", svcName)
+	if err := cmd.Run(); err != nil {
+		// Service might not be running, which is fine
+		sysLogger.Printf("warning: failed to stop service (may not be running): %v", err)
+	}
+
+	// Disable the service
+	cmd = exec.Command("systemctl", "disable", svcName)
+	if err := cmd.Run(); err != nil {
+		sysLogger.Printf("warning: failed to disable service: %v", err)
+	}
+
+	// Reload systemd daemon
+	cmd = exec.Command("systemctl", "daemon-reload")
+	if err := cmd.Run(); err != nil {
+		sysLogger.Printf("warning: failed to reload systemd daemon: %v", err)
+	}
+
+	// Remove service file
+	err := os.Remove(serviceFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to remove service file: %w", err)
+	}
+
+	fmt.Fprintf(os.Stdout, "Service %s uninstalled successfully.\n", svcName)
+	fmt.Fprintf(os.Stdout, "Service file %s has been removed.\n", serviceFilePath)
+
+	return nil
 }

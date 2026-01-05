@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
+	"golang.org/x/sys/windows/svc/mgr"
 )
 
 type ServiceAttr struct {
@@ -376,4 +378,224 @@ loop:
 	// report stopped
 	s <- svc.Status{State: svc.Stopped}
 	return false, 0
+}
+
+// isElevated checks if the current process is running with administrator privileges
+func isElevated() (bool, error) {
+	// Open current process token
+	var token windows.Token
+	err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token)
+	if err != nil {
+		return false, err
+	}
+	defer token.Close()
+
+	return token.IsElevated(), nil
+}
+
+// InstallService installs reman as a Windows service
+func InstallService(cfg *config) error {
+	// Check if running with administrator privileges
+	elevated, err := isElevated()
+	if err != nil {
+		return fmt.Errorf("failed to check administrator privileges: %w", err)
+	}
+	if !elevated {
+		return fmt.Errorf("install command must be run as administrator (right-click and select 'Run as administrator')")
+	}
+
+	// Check if procfile exists
+	procfilePath := cfg.Procfile
+	if procfilePath == "" {
+		procfilePath = *procfile
+	}
+	if procfilePath == "" {
+		procfilePath = "Procfile.toml"
+	}
+	
+	// Get absolute path of procfile
+	procfileAbsPath, err := filepath.Abs(procfilePath)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path of procfile: %w", err)
+	}
+	
+	// Check if procfile exists
+	if _, err := os.Stat(procfileAbsPath); os.IsNotExist(err) {
+		return fmt.Errorf("procfile does not exist: %s (please create the configuration file before installing the service)", procfileAbsPath)
+	}
+	
+	// Update cfg.Procfile to use absolute path for validation
+	cfg.Procfile = procfileAbsPath
+	
+	// Try to read and validate the procfile
+	if err := readProcfile(cfg); err != nil {
+		return fmt.Errorf("failed to validate procfile %s: %w", procfileAbsPath, err)
+	}
+
+	// Get the executable path
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+	exePath, err = filepath.Abs(exePath)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path: %w", err)
+	}
+
+	// Default service name
+	svcName := "reman"
+	if *serviceName != "" {
+		svcName = *serviceName
+	}
+
+	// Build service arguments
+	args := []string{"-service", svcName, "start"}
+	if cfg.Procfile != "" {
+		args = append(args, "-f", cfg.Procfile)
+	}
+	if cfg.Port != 0 {
+		args = append(args, "-p", fmt.Sprintf("%d", cfg.Port))
+	}
+	if cfg.BaseDir != "" {
+		args = append(args, "-basedir", cfg.BaseDir)
+	}
+
+	// Connect to Windows service manager
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("failed to connect to service manager: %w", err)
+	}
+	defer m.Disconnect()
+
+	// Check if service already exists
+	s, err := m.OpenService(svcName)
+	if err == nil {
+		s.Close()
+		return fmt.Errorf("service %s already exists", svcName)
+	}
+
+	// Create service configuration
+	config := mgr.Config{
+		ServiceType:      windows.SERVICE_WIN32_OWN_PROCESS,
+		StartType:        mgr.StartAutomatic,
+		ErrorControl:     mgr.ErrorNormal,
+		DisplayName:      "reman",
+		Description:      "Reman is a process manager for managing multiple processes",
+		DelayedAutoStart: false,
+	}
+
+	// Create the service
+	s, err = m.CreateService(svcName, exePath, config, args...)
+	if err != nil {
+		return fmt.Errorf("failed to create service: %w", err)
+	}
+	defer s.Close()
+
+	// Set service recovery actions
+	recoveryActions := []mgr.RecoveryAction{
+		{
+			Type:  mgr.ServiceRestart,
+			Delay: 60 * time.Second,
+		},
+		{
+			Type:  mgr.ServiceRestart,
+			Delay: 60 * time.Second,
+		},
+		{
+			Type:  mgr.NoAction,
+			Delay: 0,
+		},
+	}
+	err = s.SetRecoveryActions(recoveryActions, uint32(86400)) // 24 hours
+	if err != nil {
+		sysLogger.Printf("warning: failed to set recovery actions: %v", err)
+	}
+
+	// Create event log source
+	logName := svcName
+	if err := eventlog.InstallAsEventCreate(logName, eventlog.Error|eventlog.Warning|eventlog.Info); err != nil {
+		sysLogger.Printf("warning: failed to create event log source: %v", err)
+	}
+
+	fmt.Fprintf(os.Stdout, "Service %s installed successfully.\n", svcName)
+	fmt.Fprintf(os.Stdout, "You can start it with: sc start %s\n", svcName)
+	fmt.Fprintf(os.Stdout, "You can stop it with: sc stop %s\n", svcName)
+	fmt.Fprintf(os.Stdout, "You can remove it with: sc delete %s\n", svcName)
+
+	return nil
+}
+
+// UninstallService uninstalls reman Windows service
+func UninstallService(cfg *config) error {
+	// Check if running with administrator privileges
+	elevated, err := isElevated()
+	if err != nil {
+		return fmt.Errorf("failed to check administrator privileges: %w", err)
+	}
+	if !elevated {
+		return fmt.Errorf("uninstall command must be run as administrator (right-click and select 'Run as administrator')")
+	}
+
+	// Default service name
+	svcName := "reman"
+	if *serviceName != "" {
+		svcName = *serviceName
+	}
+
+	// Connect to Windows service manager
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("failed to connect to service manager: %w", err)
+	}
+	defer m.Disconnect()
+
+	// Open the service
+	s, err := m.OpenService(svcName)
+	if err != nil {
+		return fmt.Errorf("service %s does not exist", svcName)
+	}
+	defer s.Close()
+
+	// Query service status
+	status, err := s.Query()
+	if err != nil {
+		return fmt.Errorf("failed to query service status: %w", err)
+	}
+
+	// Stop the service if it's running
+	if status.State != svc.Stopped {
+		fmt.Fprintf(os.Stdout, "Stopping service %s...\n", svcName)
+		_, err = s.Control(svc.Stop)
+		if err != nil {
+			return fmt.Errorf("failed to stop service: %w", err)
+		}
+
+		// Wait for service to stop (max 30 seconds)
+		timeout := time.Now().Add(30 * time.Second)
+		for time.Now().Before(timeout) {
+			status, err = s.Query()
+			if err != nil {
+				break
+			}
+			if status.State == svc.Stopped {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		if status.State != svc.Stopped {
+			return fmt.Errorf("service did not stop within 30 seconds")
+		}
+		fmt.Fprintf(os.Stdout, "Service %s stopped.\n", svcName)
+	}
+
+	// Delete the service
+	err = s.Delete()
+	if err != nil {
+		return fmt.Errorf("failed to delete service: %w", err)
+	}
+
+	fmt.Fprintf(os.Stdout, "Service %s uninstalled successfully.\n", svcName)
+
+	return nil
 }

@@ -59,6 +59,8 @@ func usage() {
                                        upgrade
                                        debug
   reman start [PROCESS]            # Start the application
+  reman install                    # Install reman as a system service
+  reman uninstall                  # Uninstall reman system service
   reman version                    # Display Reman version
 Options:
 `)
@@ -482,9 +484,28 @@ func showVersion() {
 	os.Exit(0)
 }
 
+// installService installs reman as a system service
+func installService(cfg *config) error {
+	return InstallService(cfg)
+}
+
+// uninstallService uninstalls reman system service
+func uninstallService(cfg *config) error {
+	return UninstallService(cfg)
+}
+
 func main() {
 	flag.Parse()
-	if len(*serviceName) > 0 {
+	
+	// Read config early to check the command
+	cfg := readConfig()
+	
+	// Check if this is install/uninstall command - these commands may use -service flag
+	// but should not run as service
+	isInstallOrUninstall := len(cfg.Args) > 0 && (cfg.Args[0] == "install" || cfg.Args[0] == "uninstall")
+	
+	// Only run as service if serviceName is set AND it's not install/uninstall command
+	if len(*serviceName) > 0 && !isInstallOrUninstall {
 		asService, err := RunAsServiceIfNeeded(*serviceName)
 		if err != nil {
 			sysLogger.Printf("%s: %v", os.Args[0], err)
@@ -497,8 +518,6 @@ func main() {
 	}
 
 	var err error
-	cfg := readConfig()
-
 	if cfg.BaseDir != "" {
 		err = os.Chdir(cfg.BaseDir)
 		if err != nil {
@@ -513,6 +532,10 @@ func main() {
 		err = check(cfg)
 	case "help":
 		usage()
+	case "install":
+		err = installService(cfg)
+	case "uninstall":
+		err = uninstallService(cfg)
 	case "run":
 		if len(cfg.Args) >= 2 {
 			cmd, args := cfg.Args[1], cfg.Args[2:]
