@@ -138,13 +138,33 @@ type ProcManager struct {
 	ExitOnStop  *bool       `toml:"exit-on-stop,omitempty"`
 	Procs       []*ProcInfo `toml:"procs"`
 	group       *ReuseWaitGroup
+	watcher     *fsnotify.Watcher
+	watcherMu   sync.Mutex
+}
+
+func (p *ProcManager) closeWatcher() {
+	p.watcherMu.Lock()
+	defer p.watcherMu.Unlock()
+	if p.watcher != nil {
+		sysLogger.Println("closing old watcher")
+		p.watcher.Close()
+		p.watcher = nil
+	}
 }
 
 func (p *ProcManager) listen() {
+	// 先关闭旧的 watcher（如果存在）
+	p.closeWatcher()
+
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return
 	}
+
+	// 保存 watcher 引用以便后续关闭
+	p.watcherMu.Lock()
+	p.watcher = watcher
+	p.watcherMu.Unlock()
 
 	var list sync.Map
 
@@ -307,7 +327,7 @@ func readProcfile(cfg *config) error {
 		temp.ExitOnError = boolPtr(false)
 	}
 	if temp.ExitOnStop == nil {
-		temp.ExitOnStop = boolPtr(true)
+		temp.ExitOnStop = boolPtr(false)
 	}
 	if len(temp.Procs) == 0 {
 		return errors.New("no valid entry")

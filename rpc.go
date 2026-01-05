@@ -209,10 +209,57 @@ func (r *Reman) RestartAll(args []string, ret *string) (err error) {
 			err = r.(error)
 		}
 	}()
+
+	// 1. 先停止所有进程
+	sysLogger.Println("RestartAll: stopping all processes")
 	for _, proc := range procConfig.Procs {
-		if err = restartProc(proc.Name); err != nil {
-			break
+		if stopErr := stopProc(proc.Name, nil); stopErr != nil {
+			sysLogger.Printf("RestartAll: failed to stop %s: %v", proc.Name, stopErr)
+			if err == nil {
+				err = stopErr
+			}
 		}
+	}
+
+	// 2. 关闭旧的 watcher 以避免 goroutine 泄漏
+	sysLogger.Println("RestartAll: closing old watcher")
+	procMux.Lock()
+	procConfig.closeWatcher()
+	procMux.Unlock()
+
+	// 3. 重新加载配置文件
+	sysLogger.Println("RestartAll: reloading configuration file")
+	// 创建临时 config 对象用于重新加载配置
+	cfg := &config{
+		Procfile: *procfile,
+		Port:     *port,
+		BaseDir:  *basedir,
+		Args:     []string{"start"}, // 使用 start 命令来重新加载
+	}
+
+	// 重新加载配置文件
+	if reloadErr := readProcfile(cfg); reloadErr != nil {
+		sysLogger.Printf("RestartAll: failed to reload config file: %v", reloadErr)
+		if err == nil {
+			err = fmt.Errorf("failed to reload config file: %w", reloadErr)
+		}
+		return err
+	}
+	sysLogger.Println("RestartAll: configuration file reloaded successfully")
+
+	// 4. 启动所有进程
+	sysLogger.Println("RestartAll: starting all processes")
+	for _, proc := range procConfig.Procs {
+		if startErr := startProc(proc.Name, nil); startErr != nil {
+			sysLogger.Printf("RestartAll: failed to start %s: %v", proc.Name, startErr)
+			if err == nil {
+				err = startErr
+			}
+		}
+	}
+
+	if err == nil {
+		sysLogger.Println("RestartAll: all processes restarted successfully")
 	}
 	return err
 }
