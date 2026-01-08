@@ -568,8 +568,16 @@ func (r *Reman) Debug(args []string, ret *string) (err error) {
 }
 
 // command: run.
-func run(cmd string, args []string, serverPort uint) error {
-	client, err := rpc.Dial("tcp", defaultServer(serverPort))
+func run(cmd string, args []string, serverPort uint, host string) error {
+	addr := host
+	if addr == "" {
+		addr = defaultServer(serverPort)
+	} else {
+		if !strings.Contains(addr, ":") {
+			addr = fmt.Sprintf("%s:%d", addr, serverPort)
+		}
+	}
+	client, err := rpc.Dial("tcp", addr)
 	if err != nil {
 		return err
 	}
@@ -577,13 +585,22 @@ func run(cmd string, args []string, serverPort uint) error {
 	var ret string
 	switch cmd {
 	case "start":
+		if len(args) == 0 {
+			return errors.New("start command require NAME")
+		}
 		return client.Call("Reman.Start", args, &ret)
 	case "stop":
+		if len(args) == 0 {
+			return errors.New("stop command require NAME")
+		}
 		return client.Call("Reman.Stop", args, &ret)
+	case "restart":
+		if len(args) == 0 {
+			return errors.New("restart command require NAME")
+		}
+		return client.Call("Reman.Restart", args, &ret)
 	case "stop-all":
 		return client.Call("Reman.StopAll", args, &ret)
-	case "restart":
-		return client.Call("Reman.Restart", args, &ret)
 	case "restart-all":
 		return client.Call("Reman.RestartAll", args, &ret)
 	case "list":
@@ -595,6 +612,52 @@ func run(cmd string, args []string, serverPort uint) error {
 		fmt.Print(ret)
 		return err
 	case "upgrade":
+		if len(args) < 2 {
+			return errors.New("upgrade command require NAME PATH")
+		}
+		isRemote := !strings.HasPrefix(addr, "127.0.0.1:") && !strings.HasPrefix(addr, "localhost:")
+		if isRemote && len(args) >= 2 {
+			path := args[1]
+			if !strings.HasPrefix(path, "http") {
+				info, err := os.Stat(path)
+				if err != nil {
+					return fmt.Errorf("local file error: %v", err)
+				}
+				if info.IsDir() {
+					return fmt.Errorf("path is a directory: %s", path)
+				}
+				absPath, err := filepath.Abs(path)
+				if err != nil {
+					return fmt.Errorf("absolute path error: %v", err)
+				}
+				fileName := filepath.Base(absPath)
+
+				ln, err := net.Listen("tcp", "0.0.0.0:0")
+				if err != nil {
+					return err
+				}
+				port := ln.Addr().(*net.TCPAddr).Port
+
+				localIP := getLocalIP(addr)
+				if localIP == "" {
+					ln.Close()
+					return fmt.Errorf("failed to get local IP for remote upgrade")
+				}
+
+				url := fmt.Sprintf("http://%s:%d/%s", localIP, port, fileName)
+				args[1] = url
+
+				mux := http.NewServeMux()
+				mux.HandleFunc("/"+fileName, func(w http.ResponseWriter, r *http.Request) {
+					http.ServeFile(w, r, absPath)
+				})
+				srv := &http.Server{Handler: mux}
+				go srv.Serve(ln)
+				defer srv.Close()
+
+				fmt.Printf("Serving upgrade file at %s\n", url)
+			}
+		}
 		return client.Call("Reman.Upgrade", args, &ret)
 	case "debug":
 		err = client.Call("Reman.Debug", args, &ret)
@@ -650,4 +713,14 @@ func startServer(ctx context.Context, rpcChan chan<- *rpcMessage, listenPort uin
 	case <-time.After(10 * time.Second):
 		return errors.New("RPC server did not shut down in 10 seconds, quitting")
 	}
+}
+
+func getLocalIP(remoteAddr string) string {
+	conn, err := net.DialTimeout("tcp", remoteAddr, time.Second*5)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	localAddr := conn.LocalAddr().(*net.TCPAddr)
+	return localAddr.IP.String()
 }

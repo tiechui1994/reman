@@ -25,14 +25,18 @@ import (
 var sysLogger *log.Logger
 
 func init() {
+	sysLogger = log.New(os.Stderr, "[man] ", log.Lshortfile|log.Ltime|log.Ldate)
+}
+
+func setupFileLogger() {
 	cmd, _ := os.Executable()
 	runPath := filepath.Join(filepath.Dir(cmd), "run.log")
 	fd, err := os.OpenFile(runPath, os.O_CREATE|os.O_APPEND|os.O_RDWR|os.O_SYNC, os.ModePerm)
 	if err != nil {
-		os.Exit(1)
+		sysLogger.Printf("failed to open log file: %v", err)
+		return
 	}
-
-	sysLogger = log.New(fd, "[man] ", log.Lshortfile|log.Ltime|log.Ldate)
+	sysLogger.SetOutput(fd)
 }
 
 // version is the git tag at the time of build and is used to denote the
@@ -40,7 +44,7 @@ func init() {
 // time by goreleaser (see .goreleaser.yml).
 const (
 	name     = "reman"
-	version  = "0.3.16"
+	version  = "0.3.17"
 	revision = "HEAD"
 )
 
@@ -48,16 +52,16 @@ func usage() {
 	fmt.Fprint(os.Stderr, `Tasks:
   reman check                      # Show entries in Procfile
   reman help [TASK]                # Show this help
-  reman run COMMAND [PROCESS...]   # Run a command
-                                       start
-                                       stop
-                                       stop-all
-                                       restart
-                                       restart-all
-                                       list
-                                       status
-                                       upgrade
-                                       debug
+  reman run [-H host] COMMAND [PROCESS...]   # Run a command
+                              start [NAME]
+                              stop [NAME]
+                              stop-all
+                              restart [NAME]
+                              restart-all
+                              list [NAME]
+                              status [NAME]
+                              upgrade [NAME] [PATH]
+                              debug
   reman start [PROCESS]            # Start the application
   reman install                    # Install reman as a system service
   reman uninstall                  # Uninstall reman system service
@@ -273,7 +277,10 @@ var basedir = flag.String("basedir", "", "base directory")
 // show timestamp in log
 var logTime = flag.Bool("logtime", true, "show timestamp in log")
 
-var serviceName = flag.String("service", "", "Windows Service name")
+var serviceName = flag.String("service", "", "daemon service name")
+
+// remote host
+var remoteHost = flag.String("H", "", "remote host")
 
 var maxProcNameLength = 0
 
@@ -495,17 +502,19 @@ func uninstallService(cfg *config) error {
 }
 
 func main() {
+	flag.Usage = usage
 	flag.Parse()
-	
+
 	// Read config early to check the command
 	cfg := readConfig()
-	
+
 	// Check if this is install/uninstall command - these commands may use -service flag
 	// but should not run as service
 	isInstallOrUninstall := len(cfg.Args) > 0 && (cfg.Args[0] == "install" || cfg.Args[0] == "uninstall")
-	
+
 	// Only run as service if serviceName is set AND it's not install/uninstall command
 	if len(*serviceName) > 0 && !isInstallOrUninstall {
+		setupFileLogger()
 		asService, err := RunAsServiceIfNeeded(*serviceName)
 		if err != nil {
 			sysLogger.Printf("%s: %v", os.Args[0], err)
@@ -537,13 +546,25 @@ func main() {
 	case "uninstall":
 		err = uninstallService(cfg)
 	case "run":
-		if len(cfg.Args) >= 2 {
-			cmd, args := cfg.Args[1], cfg.Args[2:]
-			err = run(cmd, args, cfg.Port)
+		runFlags := flag.NewFlagSet("run", flag.ExitOnError)
+		runHost := runFlags.String("H", "", "remote host")
+		runFlags.Usage = usage
+		runFlags.Parse(cfg.Args[1:])
+
+		effectiveHost := *remoteHost
+		if *runHost != "" {
+			effectiveHost = *runHost
+		}
+
+		remaining := runFlags.Args()
+		if len(remaining) >= 1 {
+			cmd, args := remaining[0], remaining[1:]
+			err = run(cmd, args, cfg.Port, effectiveHost)
 		} else {
 			usage()
 		}
 	case "start":
+		setupFileLogger()
 		c := notifyCh()
 		err = start(context.Background(), c, cfg)
 	case "version":

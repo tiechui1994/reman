@@ -5,13 +5,14 @@ Reman 是一个功能强大的进程管理器，用于管理和监控多个进�
 ## 功能特性
 
 - ✅ **多进程管理**：同时管理多个进程，支持进程依赖关系
+- ✅ **跨主机操作**：支持通过 `-H` 参数远程控制其他主机上的进程
 - ✅ **自动重启**：支持 always、on-failure、never 三种重启策略
-- ✅ **日志管理**：彩色日志输出，支持日志文件记录
-- ✅ **RPC 控制**：通过 RPC 接口远程控制进程
+- ✅ **日志管理**：彩色日志输出，支持日志文件记录（仅在服务端运行模式下生成）
+- ✅ **RPC 控制**：通过 RPC 接口远程控制进程，支持参数校验
 - ✅ **系统服务**：支持安装为 Windows 和 Linux 系统服务
 - ✅ **配置文件热重载**：支持运行时重新加载配置文件
 - ✅ **文件监控**：自动监控可执行文件变化并重启进程
-- ✅ **进程升级**：支持在线升级进程可执行文件
+- ✅ **进程升级**：支持在线升级进程可执行文件，支持跨主机文件同步升级
 - ✅ **跨平台**：支持 Windows 和 Unix/Linux 系统
 
 ## 安装
@@ -130,32 +131,32 @@ reman start [PROCESS...]
 ### RPC 命令
 
 ```bash
-# 启动进程
-reman run start [PROCESS...]
+# 启动进程 (需指定进程名)
+reman run [-H host] start NAME...
 
-# 停止进程
-reman run stop [PROCESS...]
+# 停止进程 (需指定进程名)
+reman run [-H host] stop NAME...
 
 # 停止所有进程
-reman run stop-all
+reman run [-H host] stop-all
 
-# 重启进程
-reman run restart [PROCESS...]
+# 重启进程 (需指定进程名)
+reman run [-H host] restart NAME...
 
 # 重启所有进程（会重新加载配置文件）
-reman run restart-all
+reman run [-H host] restart-all
 
-# 查看进程列表
-reman run list
+# 查看进程列表 (支持指定进程名过滤)
+reman run [-H host] list [NAME...]
 
-# 查看进程状态
-reman run status
+# 查看进程状态 (支持指定进程名过滤)
+reman run [-H host] status [NAME...]
 
-# 升级进程
-reman run upgrade NAME PATH
+# 升级进程 (需指定进程名和路径)
+reman run [-H host] upgrade NAME PATH
 
 # 调试模式（启动 pprof）
-reman run debug
+reman run [-H host] debug
 ```
 
 ### 服务管理命令
@@ -220,10 +221,12 @@ sudo reman uninstall -service myreman
 ```bash
 -f, -procfile string     # 指定 Procfile 路径（默认：Procfile.toml）
 -p, -port uint          # RPC 服务器端口（默认：18555）
+-H, -host string         # 指定远程主机地址（用于 run 命令）
 -basedir string         # 基础目录
 -service string         # Windows 服务名称
 -rpc-server             # 是否启动 RPC 服务器（默认：true）
 -logtime                # 日志中显示时间戳（默认：true）
+-h, --help               # 显示帮助信息
 ```
 
 ## 环境变量
@@ -285,12 +288,20 @@ log = "/var/log/worker.log"
 使用 `upgrade` 命令可以升级正在运行的进程：
 
 ```bash
-# 从本地文件升级
+# 从本地文件升级（本地运行）
 reman run upgrade web /path/to/new/binary
+
+# 跨主机升级（自动将本地文件同步至远程并升级）
+reman run -H 192.168.1.100 upgrade web ./local_binary
 
 # 从 URL 下载并升级
 reman run upgrade web http://example.com/new/binary
 ```
+
+跨主机升级特性：
+- 当目标为远程主机时，客户端会自动启动一个临时的 HTTP 服务来分发本地文件。
+- 升级过程会自动处理网络路径适配，确保远程主机可访问。
+- 升级完成后临时服务会自动关闭。
 
 升级流程：
 1. 停止目标进程
@@ -369,7 +380,15 @@ SOFTWARE.
 
 ## 版本历史
 
-- v0.3.16：当前版本
+- v0.3.17 (Latest):
+  - 增加跨主机操作支持：通过 `-H` 参数管理远程进程
+  - 增强跨主机升级功能：支持本地文件自动同步升级远程对端
+  - 优化日志创建逻辑：仅在服务端/服务模式下创建 `run.log`
+  - 完善参数校验：为 `start`, `stop`, `restart`, `upgrade` 增加强制参数检查
+  - 增强 `list`/`status`：支持按进程名称过滤显示
+  - 统一帮助信息：支持 `-h`/`--help` 输出自定义使用说明
+
+- v0.3.16:
   - 支持系统服务安装和卸载
   - 支持配置文件热重载
   - 改进错误处理和日志记录
