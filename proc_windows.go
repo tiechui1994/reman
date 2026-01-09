@@ -412,21 +412,21 @@ func InstallService(cfg *config) error {
 	if procfilePath == "" {
 		procfilePath = "Procfile.toml"
 	}
-	
+
 	// Get absolute path of procfile
 	procfileAbsPath, err := filepath.Abs(procfilePath)
 	if err != nil {
 		return fmt.Errorf("failed to get absolute path of procfile: %w", err)
 	}
-	
+
 	// Check if procfile exists
 	if _, err := os.Stat(procfileAbsPath); os.IsNotExist(err) {
 		return fmt.Errorf("procfile does not exist: %s (please create the configuration file before installing the service)", procfileAbsPath)
 	}
-	
+
 	// Update cfg.Procfile to use absolute path for validation
 	cfg.Procfile = procfileAbsPath
-	
+
 	// Try to read and validate the procfile
 	if err := readProcfile(cfg); err != nil {
 		return fmt.Errorf("failed to validate procfile %s: %w", procfileAbsPath, err)
@@ -449,7 +449,7 @@ func InstallService(cfg *config) error {
 	}
 
 	// Build service arguments
-	args := []string{"-service", svcName, "start"}
+	args := []string{"-service", svcName}
 	if cfg.Procfile != "" {
 		args = append(args, "-f", cfg.Procfile)
 	}
@@ -459,6 +459,7 @@ func InstallService(cfg *config) error {
 	if cfg.BaseDir != "" {
 		args = append(args, "-basedir", cfg.BaseDir)
 	}
+	args = append(args, "start")
 
 	// Connect to Windows service manager
 	m, err := mgr.Connect()
@@ -479,7 +480,7 @@ func InstallService(cfg *config) error {
 		ServiceType:      windows.SERVICE_WIN32_OWN_PROCESS,
 		StartType:        mgr.StartAutomatic,
 		ErrorControl:     mgr.ErrorNormal,
-		DisplayName:      "reman",
+		DisplayName:      svcName,
 		Description:      "Reman is a process manager for managing multiple processes",
 		DelayedAutoStart: false,
 	}
@@ -515,6 +516,18 @@ func InstallService(cfg *config) error {
 	logName := svcName
 	if err := eventlog.InstallAsEventCreate(logName, eventlog.Error|eventlog.Warning|eventlog.Info); err != nil {
 		sysLogger.Printf("warning: failed to create event log source: %v", err)
+	}
+
+	// Add firewall rule for RPC server port
+	port := cfg.Port
+	if port == 0 {
+		port = defaultPort()
+	}
+	if err := addFirewallRule(port); err != nil {
+		sysLogger.Printf("warning: failed to add firewall rule for port %d: %v", port, err)
+		// Don't fail installation if firewall rule addition fails
+	} else {
+		fmt.Fprintf(os.Stdout, "Firewall rule added for port %d\n", port)
 	}
 
 	fmt.Fprintf(os.Stdout, "Service %s installed successfully.\n", svcName)
@@ -587,6 +600,19 @@ func UninstallService(cfg *config) error {
 			return fmt.Errorf("service did not stop within 30 seconds")
 		}
 		fmt.Fprintf(os.Stdout, "Service %s stopped.\n", svcName)
+	}
+
+	// Remove firewall rule for RPC server port
+	// Try to get port from config, fallback to default port
+	port := cfg.Port
+	if port == 0 {
+		port = defaultPort()
+	}
+	if err := removeFirewallRule(port); err != nil {
+		sysLogger.Printf("warning: failed to remove firewall rule for port %d: %v", port, err)
+		// Don't fail uninstallation if firewall rule removal fails
+	} else {
+		fmt.Fprintf(os.Stdout, "Firewall rule removed for port %d\n", port)
 	}
 
 	// Delete the service

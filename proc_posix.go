@@ -128,13 +128,13 @@ func terminateProc(proc *ProcInfo, signal os.Signal) error {
 		sysLogger.Printf("terminateProc: failed to find process %d for %s: %v", pid, proc.Name, err)
 		return err
 	}
-	
+
 	err = target.Signal(signal)
 	if err != nil {
 		sysLogger.Printf("terminateProc: failed to send signal %v to process %d for %s: %v", signal, pid, proc.Name, err)
 		return err
 	}
-	
+
 	sysLogger.Printf("terminateProc: sent signal %v to process %d (pgid %d) for %s", signal, pid, pgid, proc.Name)
 	return nil
 }
@@ -170,21 +170,21 @@ func InstallService(cfg *config) error {
 	if procfilePath == "" {
 		procfilePath = "Procfile.toml"
 	}
-	
+
 	// Get absolute path of procfile
 	procfileAbsPath, err := filepath.Abs(procfilePath)
 	if err != nil {
 		return fmt.Errorf("failed to get absolute path of procfile: %w", err)
 	}
-	
+
 	// Check if procfile exists
 	if _, err := os.Stat(procfileAbsPath); os.IsNotExist(err) {
 		return fmt.Errorf("procfile does not exist: %s (please create the configuration file before installing the service)", procfileAbsPath)
 	}
-	
+
 	// Update cfg.Procfile to use absolute path for validation
 	cfg.Procfile = procfileAbsPath
-	
+
 	// Try to read and validate the procfile
 	if err := readProcfile(cfg); err != nil {
 		return fmt.Errorf("failed to validate procfile %s: %w", procfileAbsPath, err)
@@ -207,7 +207,7 @@ func InstallService(cfg *config) error {
 	}
 
 	// Build service arguments
-	args := []string{"start"}
+	args := []string{"-service", svcName}
 	if cfg.Procfile != "" {
 		args = append(args, "-f", cfg.Procfile)
 	}
@@ -217,6 +217,7 @@ func InstallService(cfg *config) error {
 	if cfg.BaseDir != "" {
 		args = append(args, "-basedir", cfg.BaseDir)
 	}
+	args = append(args, "start")
 
 	// Get current working directory
 	workDir, err := os.Getwd()
@@ -283,6 +284,18 @@ WantedBy=multi-user.target
 		sysLogger.Printf("warning: failed to enable service: %v", err)
 	}
 
+	// Add firewall rule for RPC server port
+	port := cfg.Port
+	if port == 0 {
+		port = defaultPort()
+	}
+	if err := addFirewallRule(port); err != nil {
+		sysLogger.Printf("warning: failed to add firewall rule for port %d: %v", port, err)
+		// Don't fail installation if firewall rule addition fails
+	} else {
+		fmt.Fprintf(os.Stdout, "Firewall rule added for port %d\n", port)
+	}
+
 	fmt.Fprintf(os.Stdout, "Service %s installed successfully.\n", svcName)
 	fmt.Fprintf(os.Stdout, "Service file: %s\n", serviceFilePath)
 	fmt.Fprintf(os.Stdout, "You can start it with: systemctl start %s\n", svcName)
@@ -330,6 +343,19 @@ func UninstallService(cfg *config) error {
 	cmd = exec.Command("systemctl", "daemon-reload")
 	if err := cmd.Run(); err != nil {
 		sysLogger.Printf("warning: failed to reload systemd daemon: %v", err)
+	}
+
+	// Remove firewall rule for RPC server port
+	// Try to get port from config, fallback to default port
+	port := cfg.Port
+	if port == 0 {
+		port = defaultPort()
+	}
+	if err := removeFirewallRule(port); err != nil {
+		sysLogger.Printf("warning: failed to remove firewall rule for port %d: %v", port, err)
+		// Don't fail uninstallation if firewall rule removal fails
+	} else {
+		fmt.Fprintf(os.Stdout, "Firewall rule removed for port %d\n", port)
 	}
 
 	// Remove service file
