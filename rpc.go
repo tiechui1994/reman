@@ -52,6 +52,12 @@ type rpcMessage struct {
 	ErrCh chan error
 }
 
+type UpgradeBinaryArgs struct {
+	Name    string
+	Data    []byte
+	JsonOut bool
+}
+
 // Start do start
 func (r *Reman) Start(args []string, ret *string) (err error) {
 	var jsonOut bool
@@ -81,6 +87,10 @@ func (r *Reman) Start(args []string, ret *string) (err error) {
 		if err = startProc(arg, nil); err != nil {
 			break
 		}
+	}
+
+	if err == nil && !jsonOut {
+		*ret = fmt.Sprintf("Successfully started: %v", args)
 	}
 
 	return err
@@ -117,6 +127,10 @@ func (r *Reman) Stop(args []string, ret *string) (err error) {
 		}
 	}
 
+	if err == nil && !jsonOut {
+		*ret = fmt.Sprintf("Successfully stopped: %v", args)
+	}
+
 	return err
 }
 
@@ -150,6 +164,11 @@ func (r *Reman) StopAll(args []string, ret *string) (err error) {
 			break
 		}
 	}
+
+	if err == nil && !jsonOut {
+		*ret = "All processes stopped successfully"
+	}
+
 	return err
 }
 
@@ -182,6 +201,11 @@ func (r *Reman) Restart(args []string, ret *string) (err error) {
 			break
 		}
 	}
+
+	if err == nil && !jsonOut {
+		*ret = fmt.Sprintf("Successfully restarted: %v", args)
+	}
+
 	return err
 }
 
@@ -260,6 +284,9 @@ func (r *Reman) RestartAll(args []string, ret *string) (err error) {
 
 	if err == nil {
 		sysLogger.Println("RestartAll: all processes restarted successfully")
+		if !jsonOut {
+			*ret = "All processes restarted successfully"
+		}
 	}
 	return err
 }
@@ -306,6 +333,7 @@ func (r *Reman) Upgrade(args []string, ret *string) (err error) {
 		if err != nil {
 			return fmt.Errorf("downalod file: %v", err)
 		}
+		defer resp.Body.Close()
 
 		dir := proc.WorkDir
 		if dir == "" {
@@ -325,18 +353,86 @@ func (r *Reman) Upgrade(args []string, ret *string) (err error) {
 		}
 
 		_, err = io.CopyBuffer(writer, resp.Body, make([]byte, 8192))
+		writer.Close()
 		if err != nil {
 			return fmt.Errorf("copy file: %v", err)
 		}
 	}
-	if _, err = os.Stat(path); err != nil {
-		return err
+
+	backupName, version, err := doUpgrade(proc, path)
+	if err == nil && !jsonOut {
+		if version != "" {
+			*ret = fmt.Sprintf("Successfully upgraded %s to version %s, backup file: %s", name, version, backupName)
+		} else {
+			*ret = fmt.Sprintf("Successfully upgraded %s, backup file: %s", name, backupName)
+		}
+	}
+	return err
+}
+
+func (r *Reman) UpgradeBinary(args UpgradeBinaryArgs, ret *string) (err error) {
+	defer func() {
+		if args.JsonOut {
+			var result = make(map[string]interface{})
+			result["success"] = err == nil
+			if err != nil {
+				result["error"] = err.Error()
+			}
+			raw, _ := json.Marshal(result)
+			*ret = string(raw)
+		}
+	}()
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = r.(error)
+		}
+	}()
+
+	proc := findProc(args.Name)
+	if proc == nil {
+		return errors.New("unknown proc: " + args.Name)
+	}
+
+	dir := proc.WorkDir
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+
+	var path string
+	switch runtime.GOOS {
+	case "windows":
+		path = args.Name + "_upgrade.exe"
+	default:
+		path = args.Name + "_upgrade"
+	}
+	path = filepath.Join(dir, path)
+
+	err = os.WriteFile(path, args.Data, 0755)
+	if err != nil {
+		return fmt.Errorf("write upgrade file: %v", err)
+	}
+
+	backupName, version, err := doUpgrade(proc, path)
+	if err == nil && !args.JsonOut {
+		if version != "" {
+			*ret = fmt.Sprintf("Successfully upgraded %s to version %s, backup file: %s", args.Name, version, backupName)
+		} else {
+			*ret = fmt.Sprintf("Successfully upgraded %s, backup file: %s", args.Name, backupName)
+		}
+	}
+	return err
+}
+
+func doUpgrade(proc *ProcInfo, path string) (string, string, error) {
+	if _, err := os.Stat(path); err != nil {
+		return "", "", err
 	}
 
 	// 1. stop
-	err = stopProc(name, nil)
+	err := stopProc(proc.Name, nil)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 
 	// 2. rename
@@ -345,7 +441,7 @@ func (r *Reman) Upgrade(args []string, ret *string) (err error) {
 	}
 	cmdArgs, err := ParseCmdline(proc.CmdLine)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	cmdName := cmdArgs[0]
 
@@ -359,17 +455,28 @@ func (r *Reman) Upgrade(args []string, ret *string) (err error) {
 	}
 	err = rename(cmdName, backupName)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	err = rename(path, cmdName)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	defer os.Remove(path)
 
 	// 3. start
-	err = startProc(name, nil)
-	return err
+	err = startProc(proc.Name, nil)
+	if err != nil {
+		return backupName, "", err
+	}
+
+	// Get new version if enabled
+	var version string
+	if proc.Version {
+		_ = versionProc(proc.Name)
+		version = strings.TrimSpace(proc.version)
+	}
+
+	return backupName, version, nil
 }
 
 func printTable(keys []string, values [][]string) string {
@@ -588,21 +695,41 @@ func run(cmd string, args []string, serverPort uint, host string) error {
 		if len(args) == 0 {
 			return errors.New("start command require NAME")
 		}
-		return client.Call("Reman.Start", args, &ret)
+		err = client.Call("Reman.Start", args, &ret)
+		if err == nil {
+			fmt.Println(ret)
+		}
+		return err
 	case "stop":
 		if len(args) == 0 {
 			return errors.New("stop command require NAME")
 		}
-		return client.Call("Reman.Stop", args, &ret)
+		err = client.Call("Reman.Stop", args, &ret)
+		if err == nil {
+			fmt.Println(ret)
+		}
+		return err
 	case "restart":
 		if len(args) == 0 {
 			return errors.New("restart command require NAME")
 		}
-		return client.Call("Reman.Restart", args, &ret)
+		err = client.Call("Reman.Restart", args, &ret)
+		if err == nil {
+			fmt.Println(ret)
+		}
+		return err
 	case "stop-all":
-		return client.Call("Reman.StopAll", args, &ret)
+		err = client.Call("Reman.StopAll", args, &ret)
+		if err == nil {
+			fmt.Println(ret)
+		}
+		return err
 	case "restart-all":
-		return client.Call("Reman.RestartAll", args, &ret)
+		err = client.Call("Reman.RestartAll", args, &ret)
+		if err == nil {
+			fmt.Println(ret)
+		}
+		return err
 	case "list":
 		err = client.Call("Reman.List", args, &ret)
 		fmt.Print(ret)
@@ -612,11 +739,18 @@ func run(cmd string, args []string, serverPort uint, host string) error {
 		fmt.Print(ret)
 		return err
 	case "upgrade":
+		var jsonOut bool
+		if len(args) > 0 && args[0] == "-json" {
+			jsonOut = true
+			args = args[1:]
+		}
+
 		if len(args) < 2 {
 			return errors.New("upgrade command require NAME PATH")
 		}
+
 		isRemote := !strings.HasPrefix(addr, "127.0.0.1:") && !strings.HasPrefix(addr, "localhost:")
-		if isRemote && len(args) >= 2 {
+		if isRemote {
 			path := args[1]
 			if !strings.HasPrefix(path, "http") {
 				info, err := os.Stat(path)
@@ -630,35 +764,40 @@ func run(cmd string, args []string, serverPort uint, host string) error {
 				if err != nil {
 					return fmt.Errorf("absolute path error: %v", err)
 				}
-				fileName := filepath.Base(absPath)
 
-				ln, err := net.Listen("tcp", "0.0.0.0:0")
+				data, err := os.ReadFile(absPath)
 				if err != nil {
-					return err
-				}
-				port := ln.Addr().(*net.TCPAddr).Port
-
-				localIP := getLocalIP(addr)
-				if localIP == "" {
-					ln.Close()
-					return fmt.Errorf("failed to get local IP for remote upgrade")
+					return fmt.Errorf("read file error: %v", err)
 				}
 
-				url := fmt.Sprintf("http://%s:%d/%s", localIP, port, fileName)
-				args[1] = url
-
-				mux := http.NewServeMux()
-				mux.HandleFunc("/"+fileName, func(w http.ResponseWriter, r *http.Request) {
-					http.ServeFile(w, r, absPath)
-				})
-				srv := &http.Server{Handler: mux}
-				go srv.Serve(ln)
-				defer srv.Close()
-
-				fmt.Printf("Serving upgrade file at %s\n", url)
+				fmt.Printf("Pushing upgrade binary (%d bytes) to remote...\n", len(data))
+				err = client.Call("Reman.UpgradeBinary", UpgradeBinaryArgs{
+					Name:    args[0],
+					Data:    data,
+					JsonOut: jsonOut,
+				}, &ret)
+				if err == nil {
+					if ret != "" {
+						fmt.Println(ret)
+					} else {
+						fmt.Println("Successfully pushed and upgraded binary")
+					}
+				}
+				return err
 			}
 		}
-		return client.Call("Reman.Upgrade", args, &ret)
+		if jsonOut {
+			args = append([]string{"-json"}, args...)
+		}
+		err = client.Call("Reman.Upgrade", args, &ret)
+		if err == nil {
+			if ret != "" {
+				fmt.Println(ret)
+			} else {
+				fmt.Println("Successfully upgraded")
+			}
+		}
+		return err
 	case "debug":
 		err = client.Call("Reman.Debug", args, &ret)
 		if err == nil {
@@ -713,14 +852,4 @@ func startServer(ctx context.Context, rpcChan chan<- *rpcMessage, listenPort uin
 	case <-time.After(10 * time.Second):
 		return errors.New("RPC server did not shut down in 10 seconds, quitting")
 	}
-}
-
-func getLocalIP(remoteAddr string) string {
-	conn, err := net.DialTimeout("tcp", remoteAddr, time.Second*5)
-	if err != nil {
-		return ""
-	}
-	defer conn.Close()
-	localAddr := conn.LocalAddr().(*net.TCPAddr)
-	return localAddr.IP.String()
 }
