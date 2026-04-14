@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -624,4 +627,46 @@ func UninstallService(cfg *config) error {
 	fmt.Fprintf(os.Stdout, "Service %s uninstalled successfully.\n", svcName)
 
 	return nil
+}
+
+// restartSupervisorService 使用 sc stop/start 重启 Windows 服务（需与 -service 名称一致）。
+func restartSupervisorService() error {
+	if *serviceName == "" {
+		return errors.New("cannot restart: reman was not started with -service NAME")
+	}
+	svcName := *serviceName
+	stop := exec.Command("sc", "stop", svcName)
+	if out, err := stop.CombinedOutput(); err != nil {
+		return fmt.Errorf("sc stop %s: %v (%s)", svcName, err, string(out))
+	}
+	time.Sleep(2 * time.Second)
+	start := exec.Command("sc", "start", svcName)
+	if out, err := start.CombinedOutput(); err != nil {
+		return fmt.Errorf("sc start %s: %v (%s)", svcName, err, string(out))
+	}
+	return nil
+}
+
+// bridgeShellSession 将 TCP 连接挂到 PowerShell；启动脚本强制 UTF-8 以便 Linux 终端正确显示中文。
+func bridgeShellSession(conn net.Conn, br *bufio.Reader) error {
+	// Prefer PowerShell 7+ (UTF-8 default for redirected IO); fall back to Windows PowerShell 5.x.
+	ps, err := exec.LookPath("pwsh.exe")
+	if err != nil {
+		ps, err = exec.LookPath("powershell.exe")
+		if err != nil {
+			return err
+		}
+	}
+	// Force UTF-8 for stdin/stdout when the remote client is UTF-8 (e.g. Linux terminal).
+	// Piped sessions still honor $OutputEncoding; PS 5.x defaults to legacy code pages on zh-CN Windows.
+	const utf8Init = "try { " +
+		"[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); " +
+		"[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) " +
+		"} catch {}; " +
+		"$OutputEncoding = [System.Text.UTF8Encoding]::new($false)"
+	cmd := exec.Command(ps, "-NoLogo", "-NoProfile", "-NoExit", "-Command", utf8Init)
+	cmd.Stdin = br
+	cmd.Stdout = conn
+	cmd.Stderr = conn
+	return cmd.Run()
 }

@@ -4,16 +4,21 @@
 package main
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 )
 
@@ -367,5 +372,46 @@ func UninstallService(cfg *config) error {
 	fmt.Fprintf(os.Stdout, "Service %s uninstalled successfully.\n", svcName)
 	fmt.Fprintf(os.Stdout, "Service file %s has been removed.\n", serviceFilePath)
 
+	return nil
+}
+
+// restartSupervisorService 在 reman 以 -service 启动时使用 systemctl 重启本 unit（供 update -restart）。
+func restartSupervisorService() error {
+	if *serviceName == "" {
+		return errors.New("cannot restart: reman was not started with -service NAME")
+	}
+	cmd := exec.Command("systemctl", "restart", *serviceName)
+	return cmd.Run()
+}
+
+// bridgeShellSession 将已认证的 TCP 连接挂到 login bash（PTY），与 remote_shell 配套。
+func bridgeShellSession(conn net.Conn, br *bufio.Reader) error {
+	bashPath := "/bin/bash"
+	if p, err := exec.LookPath("bash"); err == nil {
+		bashPath = p
+	}
+	cmd := exec.Command(bashPath, "-l")
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = ptmx.Close()
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(ptmx, br)
+		_ = ptmx.Close()
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(conn, ptmx)
+	}()
+	wg.Wait()
 	return nil
 }

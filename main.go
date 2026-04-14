@@ -61,8 +61,12 @@ func usage() {
                               list [NAME]
                               status [NAME]
                               upgrade [NAME] [PATH]
+                              update [-restart] PATH_OR_URL
+                              shell
                               debug
   reman start [PROCESS]            # Start the application
+  reman shell                      # Interactive remote shell (bash / PowerShell)
+  reman update [-restart] PATH_OR_URL   # Replace reman binary (see -service for restart)
   reman install                    # Install reman as a system service
   reman uninstall                  # Uninstall reman system service
   reman version                    # Display Reman version
@@ -569,6 +573,27 @@ func main() {
 		err = start(context.Background(), c, cfg)
 	case "version":
 		showVersion()
+	case "shell":
+		// 等价于 reman run shell；连接 -H / 默认 RPC 地址上的 reman 后进入远程交互 shell。
+		err = run("shell", nil, cfg.Port, *remoteHost)
+	case "update":
+		// 本地直接替换当前 reman 二进制；与 reman run update 的区别是不经 RPC 客户端逻辑。
+		su := flag.NewFlagSet("update", flag.ExitOnError)
+		restart := su.Bool("restart", false, "restart supervisor service after upgrade (requires -service when reman runs as a service)")
+		su.Usage = func() {
+			fmt.Fprintf(os.Stderr, "usage: %s update [-restart] PATH_OR_URL\n", os.Args[0])
+			su.PrintDefaults()
+		}
+		_ = su.Parse(cfg.Args[1:])
+		if su.NArg() < 1 {
+			su.Usage()
+			os.Exit(1)
+		}
+		var backup string
+		backup, err = RunSelfUpgrade(su.Arg(0), *restart)
+		if err == nil {
+			fmt.Fprintf(os.Stdout, "upgraded reman, backup: %s\n", backup)
+		}
 	default:
 		usage()
 	}

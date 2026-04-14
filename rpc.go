@@ -674,7 +674,8 @@ func (r *Reman) Debug(args []string, ret *string) (err error) {
 	}
 }
 
-// command: run.
+// run 作为 reman run 的客户端：连接 addr 上由 reman start 暴露的 RPC，并转发子命令。
+// 子命令含 start/stop/restart、upgrade（子进程）、update（本程序自升级）、shell（交互 shell）等。
 func run(cmd string, args []string, serverPort uint, host string) error {
 	addr := host
 	if addr == "" {
@@ -798,6 +799,65 @@ func run(cmd string, args []string, serverPort uint, host string) error {
 			}
 		}
 		return err
+	case "update":
+		// 对端 reman 自升级：非本机且路径为本地文件时用 SelfUpgradeBinary 推送；否则 SelfUpgrade（URL 或服务端路径）。
+		var restartSvc bool
+		rargs := args
+		for len(rargs) > 0 {
+			if rargs[0] == "-restart" {
+				restartSvc = true
+				rargs = rargs[1:]
+				continue
+			}
+			break
+		}
+		if len(rargs) < 1 {
+			return errors.New("update requires PATH_OR_URL")
+		}
+		pathArg := rargs[0]
+
+		isRemote := !strings.HasPrefix(addr, "127.0.0.1:") && !strings.HasPrefix(addr, "localhost:")
+		if isRemote && !strings.HasPrefix(pathArg, "http") {
+			info, err := os.Stat(pathArg)
+			if err != nil {
+				return fmt.Errorf("local file error: %v", err)
+			}
+			if info.IsDir() {
+				return fmt.Errorf("path is a directory: %s", pathArg)
+			}
+			absPath, err := filepath.Abs(pathArg)
+			if err != nil {
+				return fmt.Errorf("absolute path error: %v", err)
+			}
+			data, err := os.ReadFile(absPath)
+			if err != nil {
+				return fmt.Errorf("read file error: %v", err)
+			}
+			fmt.Printf("Pushing reman update binary (%d bytes) to remote...\n", len(data))
+			err = client.Call("Reman.SelfUpgradeBinary", SelfUpgradeBinaryArgs{
+				Data:    data,
+				JsonOut: false,
+				Restart: restartSvc,
+			}, &ret)
+			if err == nil && ret != "" {
+				fmt.Println(ret)
+			}
+			return err
+		}
+
+		rpcArgs := make([]string, 0, 2)
+		if restartSvc {
+			rpcArgs = append(rpcArgs, "-restart")
+		}
+		rpcArgs = append(rpcArgs, pathArg)
+		err = client.Call("Reman.SelfUpgrade", rpcArgs, &ret)
+		if err == nil && ret != "" {
+			fmt.Println(ret)
+		}
+		return err
+	case "shell":
+		// ShellOpen 返回临时端口与令牌，再建立第二条 TCP 做终端转发（见 remote_shell.go）。
+		return runShellWithRPC(client, addr)
 	case "debug":
 		err = client.Call("Reman.Debug", args, &ret)
 		if err == nil {
@@ -808,7 +868,7 @@ func run(cmd string, args []string, serverPort uint, host string) error {
 	return errors.New("unknown command")
 }
 
-// start rpc server.
+// startServer 在 listenPort 上接受 RPC；与 ShellOpen 分配的临时 shell 端口相互独立。
 func startServer(ctx context.Context, rpcChan chan<- *rpcMessage, listenPort uint) error {
 	gm := &Reman{
 		rpcChan: rpcChan,
